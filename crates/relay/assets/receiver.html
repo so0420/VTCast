@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VTCast receiver</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    overflow: hidden;
+    color: #fff;
+    font: 12px/1.4 system-ui, sans-serif;
+  }
+  /* When opened in a regular browser, show a checkerboard so transparency
+     is visible. OBS Browser Source already has a transparent body, so this
+     only affects standalone preview. */
+  body.debug {
+    background:
+      repeating-conic-gradient(#9aa 0% 25%, #ccd 0% 50%) 0 0 / 32px 32px;
+  }
+  #stage {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+  }
+  canvas {
+    /* Scale the canvas up to fill the viewport while preserving the
+       source's aspect ratio, just like OBS Window Capture does — pick
+       whichever dimension hits 100% first and let the other follow. JS
+       sets --ar from the actual video dims; until it does we assume
+       16:9 so the layout doesn't flash empty.
+     */
+    --ar: 1.7777;
+    display: block;
+    width:  min(100vw, calc(100vh * var(--ar)));
+    height: min(100vh, calc(100vw / var(--ar)));
+    background: transparent;
+  }
+  #overlay {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 10;
+    background: rgba(0, 0, 0, .55);
+    padding: 6px 10px;
+    border-radius: 6px;
+    user-select: none;
+  }
+  #overlay.hidden { display: none; }
+  #overlay .row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+  button { font: inherit; padding: 2px 8px; }
+  .ok { color: #67e081; }
+  .warn { color: #ffc266; }
+  .err { color: #ff7575; }
+</style>
+</head>
+<body>
+<!-- Diagnostic overlay. Hidden by default so the page is OBS-Browser-Source
+     ready out of the box; pass `?debug` in the URL to show it (along with
+     the checkerboard background) when testing in a regular browser. -->
+<div id="overlay" class="hidden">
+  <div>VTCast 수신기  <span class="status" id="status">시작 중</span></div>
+  <div>룸 <span id="room">—</span>  프레임 <span id="pkts">0</span></div>
+  <div class="row">
+    <button id="bg">배경 토글</button>
+    <button id="hide">숨기기</button>
+  </div>
+</div>
+<div id="stage">
+  <canvas id="gl"></canvas>
+</div>
+<video id="src" autoplay playsinline muted style="display:none"></video>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const ROOM = params.get('room');
+// `?debug` shows both the checkerboard background (so transparency is
+// visible when testing outside OBS) and the diagnostic overlay. Without
+// it the page renders into a fully transparent canvas with no chrome,
+// which is what OBS Browser Source expects.
+if (params.has('debug')) {
+  document.body.classList.add('debug');
+  $('overlay').classList.remove('hidden');
+}
+
+const status = (s, cls = '') => { const el = $('status'); el.textContent = s; el.className = 'status ' + cls; };
+$('room').textContent = ROOM || '(missing)';
+
+$('bg').onclick = () => document.body.classList.toggle('debug');
+$('hide').onclick = () => $('overlay').classList.add('hidden');
+
+if (!ROOM) {
+  status('URL에 room 파라미터가 없습니다 — /r?room=코드 형식으로 사용', 'err');
+  throw new Error('no room param');
+}
+
+// === WebGL alpha reconstruction (side-by-side packed input) ===
+const canvas = $('gl');
+const video = $('src');
+const gl = canvas.getContext('webgl2', { premultipliedAlpha: false, alpha: true, antialias: false });
+if (!gl) { status('WebGL2 사용 불가', 'err'); throw new Error('no webgl2'); }
+
+const vsrc = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  v_uv.y = 1.0 - v_uv.y;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+// Sample left half for RGB, right half for alpha. Y is flipped above to
+// match the WebRTC video element's orientation.
+const fsrc = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 fragColor;
+void main() {
+  vec2 uvRgb = vec2(v_uv.x * 0.5,         v_uv.y);
+  vec2 uvA   = vec2(v_uv.x * 0.5 + 0.5,   v_uv.y);
+  vec3 rgb = texture(u_tex, uvRgb).rgb;
+  float a  = texture(u_tex, uvA).r;
+  fragColor = vec4(rgb, a);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsrc));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsrc));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, 'a_pos');
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+gl.clearColor(0, 0, 0, 0);
+
+let sized = false;
+let frames = 0;
+function render() {
+  if (video.readyState >= 2 && video.videoWidth > 0) {
+    if (!sized) {
+      // Packed source has RGB on the left half; output is that half's width.
+      canvas.width  = video.videoWidth / 2;
+      canvas.height = video.videoHeight;
+      // Tell CSS the precise source aspect so the min()/calc() in the
+      // canvas stylesheet scales it up to fill the viewport. Until this
+      // fires the fallback is 16:9.
+      canvas.style.setProperty('--ar', canvas.width / canvas.height);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      sized = true;
+      status('디코딩 중 ' + canvas.width + '×' + canvas.height, 'ok');
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    frames++;
+    if (frames % 30 === 0) $('pkts').textContent = frames;
+  }
+  requestAnimationFrame(render);
+}
+render();
+
+// === WebRTC subscriber flow (mesh / peer-to-peer) ===
+//
+// The relay no longer proxies media — it just routes Sdp/IceCandidate
+// envelopes by `to:` field. Our flow:
+//   1. Hello to relay (role=subscriber, room=ROOM)
+//   2. Welcome → cache ice_servers + own peer_id
+//   3. Wait for the publisher to send an Offer. Publisher addresses it to us
+//      by `to=our_peer_id`; relay forwards with `from=publisher_id`.
+//   4. Create RTCPeerConnection, setRemote(offer), createAnswer,
+//      sendMsg({type:'sdp', kind:'answer', to: publisher_id, sdp})
+//   5. Both sides trickle ICE candidates, each addressed `to` the other.
+//
+// Recovery: if the PC goes to `failed` or stays `disconnected` too long, the
+// whole session is torn down and a fresh connect() runs. The relay sees a
+// new subscriber peer_id; the publisher's PeerJoined handler creates a fresh
+// PC and offers anew. This is what unsticks the receiver after a publisher
+// reconnect occasionally leaves ICE in a permanently failed state.
+let recoveryScheduled = false;
+function scheduleRecovery(reason, oldWs) {
+  if (recoveryScheduled) return;
+  recoveryScheduled = true;
+  console.warn('[receiver] recovering:', reason);
+  try { oldWs && oldWs.close(); } catch {}
+  setTimeout(() => {
+    recoveryScheduled = false;
+    connect();
+  }, 1500);
+}
+
+async function connect() {
+  status('연결 중', 'warn');
+
+  const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+  const ws = new WebSocket(wsUrl);
+  let seq = 0;
+  const sendMsg = (m) => ws.send(JSON.stringify({ seq: ++seq, ...m }));
+
+  let iceServers = [];
+  let pc = null;
+  let publisherId = null;
+  // Browser may emit ICE candidates before we know the publisher's peer_id
+  // if the order ever inverts; buffer them and flush when publisherId is set.
+  const pendingIce = [];
+
+  // Tear down the current session. Called both when peer_left arrives for
+  // the publisher AND defensively at the top of every new offer — on a fast
+  // publisher reconnect, the relay's per-peer cleanup races with the new
+  // publisher's first offer, so peer_left for the OLD peer_id may arrive
+  // after the new offer (by which time publisherId has already moved on and
+  // the peer_left handler stops matching). Resetting on every fresh offer
+  // makes the receiver self-heal regardless of message ordering.
+  function resetSession() {
+    if (pc) {
+      try { pc.close(); } catch {}
+      pc = null;
+    }
+    publisherId = null;
+    pendingIce.length = 0;
+    video.srcObject = null;
+  }
+
+  function ensurePc() {
+    if (pc) return pc;
+    pc = new RTCPeerConnection({ iceServers });
+    window.pc = pc; // devtools
+
+    const remote = new MediaStream();
+    video.srcObject = remote;
+    pc.ontrack = (e) => {
+      remote.addTrack(e.track);
+      video.play().catch((err) => console.warn('video.play() rejected', err));
+    };
+
+    pc.onicecandidate = (e) => {
+      if (!e.candidate) return;
+      const payload = JSON.stringify(e.candidate.toJSON());
+      if (publisherId === null) {
+        pendingIce.push(payload);
+        return;
+      }
+      sendMsg({ type: 'ice_candidate', candidate: payload, to: publisherId });
+    };
+    let disconnectedAt = null;
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      if (s === 'connected') {
+        status('연결됨', 'ok');
+        disconnectedAt = null;
+      } else if (s === 'failed') {
+        // ICE gave up entirely. Recover immediately — there's nothing the
+        // browser can do internally from here.
+        status('실패', 'err');
+        scheduleRecovery('PC failed', ws);
+      } else if (s === 'disconnected') {
+        // ICE consent freshness dropped. The browser will keep trying to
+        // re-establish; only recover if it can't get back within ~4 s.
+        status('연결 끊김', 'err');
+        if (disconnectedAt === null) disconnectedAt = Date.now();
+        setTimeout(() => {
+          if (pc && pc.connectionState === 'disconnected'
+              && disconnectedAt !== null
+              && Date.now() - disconnectedAt >= 4000) {
+            scheduleRecovery('PC stuck disconnected', ws);
+          }
+        }, 4500);
+      } else {
+        status(s, 'warn');
+      }
+    };
+    return pc;
+  }
+
+  ws.onopen = () => sendMsg({ type: 'hello', protocol_version: 2, role: 'subscriber', room: ROOM });
+  ws.onmessage = async (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'welcome') {
+      const ice = m.room_state && m.room_state.ice_servers;
+      if (ice && ice.length) iceServers = ice;
+      status('퍼블리셔 대기 중', 'warn');
+    } else if (m.type === 'sdp' && m.kind === 'offer') {
+      // Each fresh offer is a fresh publisher session — even if peer_left
+      // for the previous publisher hasn't arrived yet. Tear down first.
+      resetSession();
+      publisherId = m.from;
+      ensurePc();
+      await pc.setRemoteDescription({ type: 'offer', sdp: m.sdp });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      sendMsg({ type: 'sdp', kind: 'answer', sdp: answer.sdp, to: publisherId });
+      // Flush any ICE candidates that fired before publisher_id was known.
+      for (const c of pendingIce.splice(0)) {
+        sendMsg({ type: 'ice_candidate', candidate: c, to: publisherId });
+      }
+    } else if (m.type === 'ice_candidate') {
+      // Only accept ICE that's tagged with the current publisher id. After
+      // a reconnect, leftover ICE from the previous publisher session can
+      // still trickle in via the relay's outbound buffer and would otherwise
+      // poison the new PC.
+      if (!pc || (m.from !== undefined && m.from !== publisherId)) return;
+      try { await pc.addIceCandidate(JSON.parse(m.candidate)); }
+      catch (e) { console.warn('addIceCandidate', e); }
+    } else if (m.type === 'peer_left' && m.peer_id === publisherId) {
+      status('퍼블리셔가 나갔습니다', 'warn');
+      resetSession();
+    } else if (m.type === 'error') {
+      status('오류: ' + m.detail, 'err');
+    }
+  };
+  ws.onclose = () => {
+    status('웹소켓 종료', 'err');
+    // Unexpected WS close (relay restart, prolonged network drop). Recover
+    // unless the close was triggered by our own scheduleRecovery() which
+    // already armed a retry.
+    scheduleRecovery('ws closed', null);
+  };
+  ws.onerror = () => status('웹소켓 오류', 'err');
+}
+connect();
+</script>
+</body>
+</html>

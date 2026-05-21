@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "main-capability",
+  "description": "Default permissions for the main window — needs core:default to use invoke + event.listen/emit.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

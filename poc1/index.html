@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alpha PoC — side-by-side reconstruction</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    overflow: hidden;
+  }
+  /* When opened directly in a browser, show a checkerboard so transparency is visible.
+     OBS Browser Source uses a transparent <body> regardless. */
+  body.debug {
+    background:
+      repeating-conic-gradient(#9aa 0% 25%, #ccd 0% 50%) 0 0 / 32px 32px;
+  }
+  #stage {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: grid;
+    place-items: center;
+  }
+  canvas {
+    display: block;
+    width: min(100vw, calc(100vh * 16 / 9));
+    height: auto;
+    aspect-ratio: 16 / 9;
+    background: transparent;
+  }
+  #controls {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 10;
+    font: 12px/1.4 system-ui, sans-serif;
+    background: rgba(0,0,0,.5);
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 6px;
+    user-select: none;
+  }
+  #controls.hidden { display: none; }
+  button { font: inherit; margin-left: 4px; }
+</style>
+</head>
+<body>
+  <div id="controls">
+    <span id="status">loading…</span>
+    <button id="bg">toggle debug bg</button>
+    <button id="hide">hide UI</button>
+  </div>
+  <div id="stage">
+    <canvas id="gl" width="1280" height="720"></canvas>
+  </div>
+  <video id="src" src="packed.mp4" autoplay loop muted playsinline crossorigin="anonymous" style="display:none"></video>
+
+<script>
+const video = document.getElementById('src');
+const canvas = document.getElementById('gl');
+const status = document.getElementById('status');
+
+const gl = canvas.getContext('webgl2', { premultipliedAlpha: false, alpha: true, antialias: false });
+if (!gl) { status.textContent = 'WebGL2 unavailable'; throw new Error('no webgl2'); }
+
+const vsrc = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  v_uv.y = 1.0 - v_uv.y;            // flip Y to match video orientation
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+// Sample left half for RGB, right half for alpha. The 0.001 inset avoids the
+// chroma-subsampling boundary between the two halves bleeding into samples.
+const fsrc = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 fragColor;
+void main() {
+  vec2 uvRgb = vec2(v_uv.x * 0.5,         v_uv.y);
+  vec2 uvA   = vec2(v_uv.x * 0.5 + 0.5,   v_uv.y);
+  vec3 rgb = texture(u_tex, uvRgb).rgb;
+  float a  = texture(u_tex, uvA).r;       // luma in alpha half
+  fragColor = vec4(rgb, a);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsrc));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsrc));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,  1,-1,  -1,1,  1,1]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, 'a_pos');
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+gl.clearColor(0, 0, 0, 0);
+
+let started = false;
+function loop() {
+  if (video.readyState >= 2 && video.videoWidth > 0) {
+    if (!started) {
+      // Output canvas keeps source half-width since RGB occupies the left half
+      canvas.width  = video.videoWidth / 2;
+      canvas.height = video.videoHeight;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      status.textContent = `playing  ${canvas.width}x${canvas.height}  ${video.videoWidth}x${video.videoHeight} packed`;
+      started = true;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  requestAnimationFrame(loop);
+}
+video.addEventListener('loadeddata', () => { status.textContent = 'ready'; });
+video.addEventListener('error', () => { status.textContent = 'video error'; });
+loop();
+
+// Debug controls
+const params = new URLSearchParams(location.search);
+if (params.has('debug')) document.body.classList.add('debug');
+if (params.has('nochrome')) document.getElementById('controls').classList.add('hidden');
+
+document.getElementById('bg').addEventListener('click', () => {
+  document.body.classList.toggle('debug');
+});
+document.getElementById('hide').addEventListener('click', () => {
+  document.getElementById('controls').classList.add('hidden');
+});
+</script>
+</body>
+</html>

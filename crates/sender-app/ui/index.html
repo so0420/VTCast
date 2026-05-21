@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VTCast</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    font: 13px/1.45 system-ui, sans-serif;
+  }
+  html, body { margin: 0; padding: 0; }
+  body {
+    padding: 16px 18px;
+    background: Canvas;
+    color: CanvasText;
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  label {
+    display: block;
+    margin-top: 10px;
+    font-weight: 600;
+    font-size: 12px;
+  }
+  input, select {
+    width: 100%;
+    padding: 5px 8px;
+    box-sizing: border-box;
+    font: inherit;
+  }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  .actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  button {
+    flex: 1;
+    padding: 8px 12px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    background: #888;
+    color: #fff;
+  }
+  .pill.idle { background: #777; }
+  .pill.starting, .pill.connecting { background: #c47f00; }
+  .pill.publishing { background: #0a7d2f; }
+  .pill.error, .pill.stopped { background: #b32; }
+  .status-line {
+    margin-top: 14px;
+    padding: 8px 10px;
+    background: #00000010;
+    border-radius: 6px;
+    min-height: 38px;
+  }
+  .url-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-top: 8px;
+  }
+  .url-row input { font-size: 12px; }
+  .events {
+    margin-top: 14px;
+    background: #00000010;
+    border-radius: 6px;
+    padding: 8px 10px;
+    height: 160px;
+    overflow-y: auto;
+    font-size: 12px;
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  .events div { white-space: pre-wrap; }
+  .muted { color: #00000088; font-size: 11px; }
+</style>
+</head>
+<body>
+<h1>VTCast <span id="status" class="pill idle">대기</span></h1>
+
+<label>릴레이 URL</label>
+<input id="relay" value="https://vtcast.jamku.me">
+
+<div class="row">
+  <div>
+    <label>룸 코드 (비우면 자동 발급)</label>
+    <input id="room" placeholder="auto">
+  </div>
+  <div>
+    <label>백엔드</label>
+    <select id="backend">
+      <option value="ffmpeg" selected>ffmpeg (서브프로세스)</option>
+      <option value="mf">Media Foundation (인프로세스)</option>
+    </select>
+  </div>
+</div>
+
+<div class="row">
+  <div>
+    <label>ffmpeg 인코더</label>
+    <select id="encoder">
+      <option value="libx264">libx264 (CPU)</option>
+      <option value="nvenc" selected>nvenc (NVIDIA)</option>
+      <option value="qsv">qsv (Intel)</option>
+      <option value="amf">amf (AMD)</option>
+    </select>
+  </div>
+  <div></div>
+</div>
+
+<div class="row">
+  <div>
+    <label>소스 종류</label>
+    <select id="sourceKind">
+      <option value="spout" selected>Spout (VTuber 앱)</option>
+      <option value="window">윈도우 (모든 앱)</option>
+      <option value="display">디스플레이 (모니터 전체)</option>
+    </select>
+  </div>
+  <div>
+    <label id="sourceLabel">Spout 센더</label>
+    <div class="row" style="gap: 6px; align-items: stretch;">
+      <select id="sender" style="flex: 1;">
+        <option value="">(로딩 중…)</option>
+      </select>
+      <button id="refreshSenders" type="button" style="flex: 0 0 auto; padding: 4px 10px;" title="소스 목록 새로고침">↻</button>
+    </div>
+  </div>
+</div>
+<div id="senderHint" class="muted" style="font-size: 11px; margin-top: 4px;"></div>
+
+<div id="chromaKeySection" style="margin-top: 10px; padding: 8px 10px; background: #00000010; border-radius: 6px; display: none;">
+  <label style="display: flex; align-items: center; gap: 6px; margin-top: 0;">
+    <input id="ckEnabled" type="checkbox">
+    <span>크로마 키 (캡처에 알파가 없을 때 사용)</span>
+  </label>
+  <div class="row" style="margin-top: 6px;">
+    <div style="flex: 0 0 60px;">
+      <label>키 색상</label>
+      <input id="ckColor" type="color" value="#00ff00" style="width: 100%; height: 28px; padding: 0;">
+    </div>
+    <div>
+      <label>임계값 (<span id="ckThreshVal">60</span>)</label>
+      <input id="ckThreshold" type="range" min="0" max="255" value="60" style="width: 100%;">
+    </div>
+    <div>
+      <label>경계 부드러움 (<span id="ckSoftVal">30</span>)</label>
+      <input id="ckSoftness" type="range" min="0" max="255" value="30" style="width: 100%;">
+    </div>
+  </div>
+</div>
+
+<div class="row">
+  <div>
+    <label>FPS</label>
+    <input id="fps" type="number" value="30" min="5" max="60">
+  </div>
+  <div>
+    <label>비트레이트 (kbps)</label>
+    <input id="bitrate" type="number" value="8000" min="500" max="20000" step="500">
+  </div>
+</div>
+
+<div class="actions">
+  <button id="connect" disabled>연결</button>
+  <button id="disconnect" disabled>연결 해제</button>
+</div>
+
+<div class="status-line" id="statusLine">
+  <span class="muted">연결되지 않음.</span>
+</div>
+
+<div class="url-row" id="urlRow" style="display:none">
+  <input id="receiverUrl" readonly>
+  <button id="copyUrl" style="flex:0 0 auto">복사</button>
+</div>
+
+<div class="events" id="events"></div>
+
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const listen = window.__TAURI__.event.listen;
+
+const $ = (id) => document.getElementById(id);
+const setStatus = (text, cls) => {
+  const el = $('status');
+  el.textContent = text;
+  el.className = 'pill ' + cls;
+};
+
+// Bumped to v2 with the 8080 → 17239 port change so existing installs
+// don't keep showing the old default in the relay URL field. Bump again
+// any time the meaning of a persisted field changes.
+const SETTINGS_KEY = 'vtcast:settings:v4';
+const PERSIST_IDS = [
+  'relay', 'room', 'encoder', 'fps', 'bitrate', 'backend', 'sourceKind',
+  'ckEnabled', 'ckColor', 'ckThreshold', 'ckSoftness',
+];
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    for (const id of PERSIST_IDS) {
+      const el = $(id);
+      if (data[id] === undefined || !el) continue;
+      if (el.type === 'checkbox') el.checked = !!data[id];
+      else el.value = data[id];
+    }
+  } catch (_) {}
+}
+
+function saveSettings() {
+  try {
+    const data = {};
+    for (const id of PERSIST_IDS) {
+      const el = $(id);
+      if (!el) continue;
+      data[id] = el.type === 'checkbox' ? el.checked : el.value;
+    }
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(data));
+  } catch (_) {}
+}
+
+loadSettings();
+
+const log = (line) => {
+  const ts = new Date().toLocaleTimeString();
+  const div = document.createElement('div');
+  div.textContent = `[${ts}] ${line}`;
+  $('events').appendChild(div);
+  $('events').scrollTop = $('events').scrollHeight;
+};
+
+let ausSent = 0;
+
+function updateConnectAvailability() {
+  // Connect is only meaningful when at least one source is available.
+  const sel = $('sender');
+  const hasSource = !!sel.value;
+  // Don't override the disabled flag set during an active pipeline.
+  if (!isRunning) {
+    $('connect').disabled = !hasSource;
+  }
+}
+
+let isRunning = false;
+
+async function refreshSenders() {
+  const kind = $('sourceKind').value;
+  const sel = $('sender');
+  const label = $('sourceLabel');
+  const hint = $('senderHint');
+  sel.innerHTML = '<option value="">(확인 중…)</option>';
+  hint.textContent = '';
+
+  try {
+    if (kind === 'spout') {
+      label.textContent = 'Spout 센더';
+      let senders = [];
+      try {
+        senders = await invoke('list_senders');
+      } catch (_) {
+        senders = [];
+      }
+      sel.innerHTML = '';
+      if (senders.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = ''; opt.textContent = '(Spout 소스를 찾지 못함)';
+        sel.appendChild(opt);
+        hint.textContent = 'VTuber 앱의 Spout 출력을 켠 뒤 ↻를 눌러주세요.';
+      } else {
+        for (const name of senders) {
+          const opt = document.createElement('option');
+          opt.value = name; opt.textContent = name;
+          sel.appendChild(opt);
+        }
+        hint.textContent = `${senders.length}개의 센더 발견.`;
+      }
+    } else if (kind === 'window') {
+      label.textContent = '윈도우';
+      const windows = await invoke('list_windows');
+      sel.innerHTML = '';
+      if (windows.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = ''; opt.textContent = '(창 없음)';
+        sel.appendChild(opt);
+      } else {
+        for (const title of windows) {
+          const opt = document.createElement('option');
+          opt.value = title;
+          opt.textContent = title.length > 60 ? title.slice(0, 57) + '…' : title;
+          opt.title = title;
+          sel.appendChild(opt);
+        }
+        hint.textContent = `${windows.length}개의 창 발견. 캡처에 알파 채널이 없으니 필요하면 아래 크로마 키로 투명도를 만들 수 있어요.`;
+      }
+    } else if (kind === 'display') {
+      label.textContent = '디스플레이';
+      const displays = await invoke('list_displays');
+      sel.innerHTML = '';
+      if (displays.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = ''; opt.textContent = '(디스플레이 없음)';
+        sel.appendChild(opt);
+      } else {
+        for (const [idx, name] of displays) {
+          const opt = document.createElement('option');
+          opt.value = String(idx);
+          opt.textContent = `${idx}: ${name}`;
+          sel.appendChild(opt);
+        }
+        hint.textContent = `${displays.length}개의 디스플레이 발견.`;
+      }
+    }
+  } catch (e) {
+    sel.innerHTML = '<option value="">(오류)</option>';
+    hint.textContent = `${kind} 소스 목록 조회 실패: ${e}`;
+    log(`list_${kind} 실패: ${e}`);
+  }
+  updateConnectAvailability();
+}
+
+$('refreshSenders').onclick = refreshSenders;
+
+// Auto-restart the pipeline when the user picks a different Spout sender /
+// window / display from the dropdown. Source KIND changes still require
+// manual reconnect (different capture path, different chroma-key relevance,
+// different sender-vs-source-name plumbing) so those just show a warning.
+let pendingRestart = false;
+$('sender').onchange = () => {
+  updateConnectAvailability();
+  if (!isRunning) return;
+  pendingRestart = true;
+  log('소스 변경 감지 — 새 소스로 재시작합니다');
+  invoke('stop_pipeline').catch((e) => log('자동 재시작 stop 실패: ' + e));
+};
+
+$('sourceKind').onchange = () => {
+  if (isRunning) {
+    alert('변경된 소스를 송출하려면 직접 연결 해제 후 재연결을 눌러주세요');
+  }
+  saveSettings();
+  refreshSenders();
+  updateChromaSectionVisibility();
+};
+
+function updateChromaSectionVisibility() {
+  // Chroma key only matters when the source has no native alpha.
+  // Spout already carries alpha; Window/Display don't.
+  const visible = $('sourceKind').value !== 'spout';
+  $('chromaKeySection').style.display = visible ? '' : 'none';
+}
+
+// Slider value indicators
+$('ckThreshold').oninput = () => { $('ckThreshVal').textContent = $('ckThreshold').value; };
+$('ckSoftness').oninput  = () => { $('ckSoftVal').textContent  = $('ckSoftness').value; };
+
+// Decode #rrggbb -> [r, g, b]
+function hexToRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
+
+function chromaKeyFromUI() {
+  if (!$('ckEnabled').checked) return null;
+  const [r, g, b] = hexToRgb($('ckColor').value);
+  return {
+    r, g, b,
+    threshold: parseInt($('ckThreshold').value, 10) | 0,
+    softness:  parseInt($('ckSoftness').value, 10) | 0,
+  };
+}
+
+updateChromaSectionVisibility();
+// Re-sync slider labels from loaded settings
+$('ckThreshVal').textContent = $('ckThreshold').value;
+$('ckSoftVal').textContent = $('ckSoftness').value;
+
+async function startPipeline() {
+  ausSent = 0;
+  saveSettings();
+  isRunning = true;
+  setStatus('시작 중', 'starting');
+  $('connect').disabled = true;
+  $('disconnect').disabled = false;
+  $('statusLine').innerHTML = '<span class="muted">파이프라인 시작 중…</span>';
+  $('urlRow').style.display = 'none';
+
+  const kind = $('sourceKind').value;
+  const value = $('sender').value || null;
+  const config = {
+    relay_url: $('relay').value.trim(),
+    room: $('room').value.trim() || null,
+    // For spout, sender_name is the Spout sender. For window/display we
+    // pass it via source_name; sender_name stays null so the spout-path
+    // code doesn't accidentally pick it up.
+    sender_name: kind === 'spout' ? value : null,
+    fps: parseInt($('fps').value, 10) || 30,
+    bitrate_kbps: parseInt($('bitrate').value, 10) || 4000,
+    encoder: $('encoder').value,
+    backend: $('backend').value,
+    source_kind: kind,
+    source_name: kind === 'spout' ? null : value,
+    chroma_key: chromaKeyFromUI(),
+  };
+
+  try {
+    await invoke('start_pipeline', { config });
+  } catch (e) {
+    log('파이프라인 시작 실패: ' + e);
+    setStatus('오류', 'error');
+    isRunning = false;
+    $('disconnect').disabled = true;
+    updateConnectAvailability();
+  }
+}
+
+async function stopPipeline() {
+  $('disconnect').disabled = true;
+  log('중지 요청됨');
+  try {
+    await invoke('stop_pipeline');
+  } catch (e) {
+    log('파이프라인 중지 실패: ' + e);
+  }
+}
+
+$('connect').onclick = startPipeline;
+$('disconnect').onclick = () => {
+  // Manual disconnect cancels any pending auto-restart triggered by a
+  // mid-run source change.
+  pendingRestart = false;
+  stopPipeline();
+};
+$('copyUrl').onclick = async () => {
+  const url = $('receiverUrl').value;
+  await navigator.clipboard.writeText(url);
+  log('복사됨: ' + url);
+};
+
+// Register the pipeline_event listener and populate the sender dropdown
+// in parallel. Doing them sequentially with `await` previously caused the
+// dropdown to stay on "(loading…)" if the listen promise stalled.
+log('이벤트 리스너 등록 중…');
+listen('pipeline_event', (e) => {
+  const ev = e.payload;
+  log('EVT ' + JSON.stringify(ev).slice(0, 160));
+  handleEvent(ev);
+}).then(() => log('리스너 준비됨'))
+  .catch((e) => log('리스너 등록 실패: ' + e));
+
+refreshSenders();
+
+function handleEvent(ev) {
+  switch (ev.kind) {
+    case 'started': {
+      log('파이프라인 시작 — 룸 ' + ev.room);
+      $('receiverUrl').value = ev.receiver_url;
+      $('urlRow').style.display = '';
+      // Reflect the actual room code being used into the UI. If the user
+      // left the room field blank, the relay minted one; show it here so
+      // the next start reuses the same code and so the user can copy it.
+      $('room').value = ev.room;
+      saveSettings();
+      $('statusLine').innerHTML =
+        `<b>소스</b>: ${ev.source.sender_name} ${ev.source.width}×${ev.source.height}<br>` +
+        `<b>어댑터</b>: ${ev.source.adapter}<br>` +
+        `<b>룸</b>: ${ev.room}`;
+      setStatus('연결 중', 'connecting');
+      break;
+    }
+    case 'publisher_connected':
+      log('송신 연결됨 (시도 ' + ev.attempt + ')');
+      setStatus('송출 중', 'publishing');
+      break;
+    case 'publisher_disconnected':
+      log('송신 연결 끊김: ' + ev.reason + (ev.will_retry ? ' (재시도 예정)' : ' (복구 불가)'));
+      setStatus(ev.will_retry ? '연결 중' : '오류', ev.will_retry ? 'connecting' : 'error');
+      break;
+    case 'publishing':
+      ausSent = ev.aus_sent;
+      const live = document.getElementById('publishingLine');
+      const text = `<b>전송 프레임</b>: ${ausSent}`;
+      if (live) live.innerHTML = text;
+      else {
+        const span = document.createElement('div');
+        span.id = 'publishingLine';
+        span.innerHTML = text;
+        $('statusLine').appendChild(span);
+      }
+      break;
+    case 'error':
+      log('오류: ' + ev.detail);
+      setStatus('오류', 'error');
+      break;
+    case 'stopped':
+      log('파이프라인 중지됨');
+      setStatus('중지됨', 'stopped');
+      isRunning = false;
+      $('disconnect').disabled = true;
+      updateConnectAvailability();
+      if (pendingRestart) {
+        pendingRestart = false;
+        log('새 소스로 재시작');
+        startPipeline();
+      }
+      break;
+    default:
+      log('알 수 없는 이벤트 종류: ' + ev.kind);
+  }
+}
+</script>
+</body>
+</html>

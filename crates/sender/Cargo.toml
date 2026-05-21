@@ -1,0 +1,57 @@
+[package]
+name = "vtcast-sender"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "vtcast-cli"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "vtcast-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "list_mf_encoders"
+path = "src/bin/list_mf_encoders.rs"
+
+[[bin]]
+name = "encode_test"
+path = "src/bin/encode_test.rs"
+
+[[bin]]
+name = "encode_test_async"
+path = "src/bin/encode_test_async.rs"
+
+[dependencies]
+vtcast-capture = { path = "../capture" }
+vtcast-protocol = { path = "../protocol" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+bytes = "1"
+async-trait = "0.1"
+webrtc = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.60"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_KernelStreaming",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+]

@@ -1,0 +1,45 @@
+[package]
+name = "vtcast-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "list_senders"
+path = "src/bin/list_senders.rs"
+
+[[bin]]
+name = "test_wgc"
+path = "src/bin/test_wgc.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+parking_lot = "0.12"
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.60"
+features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+]
+
+[dependencies.windows]
+version = "0.60"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+]

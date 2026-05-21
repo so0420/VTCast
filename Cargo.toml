@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/capture",
+    "crates/protocol",
+    "crates/relay",
+    "crates/sender",
+    "crates/sender-app",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/so0420/vtcast"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev]
+opt-level = 1

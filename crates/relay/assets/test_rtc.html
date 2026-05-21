@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>vtcast-relay SFU test (deprecated — now mesh P2P)</title>
+<style>
+  body { font: 13px/1.5 system-ui, sans-serif; margin: 16px; max-width: 900px; }
+  h1 { font-size: 16px; }
+  pre { background: #f4f4f4; padding: 8px; border-radius: 6px; max-height: 240px; overflow: auto; }
+  .row { margin-bottom: 8px; }
+  .status { font-weight: 600; }
+  .ok { color: #0a7d2f; }
+  .warn { color: #c47f00; }
+  .err { color: #b32; }
+  button { font: inherit; padding: 4px 10px; }
+  input { font: inherit; padding: 3px 6px; width: 120px; }
+  video, canvas { width: 360px; background: #000; }
+  .pub-only, .sub-only { display: none; }
+  body.pub .pub-only, body.sub .sub-only { display: block; }
+  .role-pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; color: #fff; }
+  .role-pill.pub { background: #2a6df4; }
+  .role-pill.sub { background: #18a455; }
+</style>
+</head>
+<body>
+<h1>vtcast-relay SFU test (deprecated)  <span id="rolePill" class="role-pill"></span></h1>
+
+<div class="row">
+  Room: <input id="room" placeholder="(auto)">
+  <button id="run">Run</button>
+  <span class="status" id="status">idle</span>
+</div>
+<div class="row pub-only">Publishing this canvas:</div>
+<canvas id="cv" width="320" height="180" class="pub-only" style="border:1px solid #ccc"></canvas>
+<div class="row sub-only">Receiving:</div>
+<video id="vid" class="sub-only" autoplay playsinline muted></video>
+<pre id="log"></pre>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const log = (...a) => { const s = a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' '); $('log').textContent += s + '\n'; $('log').scrollTop = $('log').scrollHeight; console.log(...a); };
+const setStatus = (s, cls = '') => { const el = $('status'); el.textContent = s; el.className = 'status ' + cls; };
+
+const params = new URLSearchParams(location.search);
+const ROLE = params.get('role') === 'subscriber' ? 'subscriber' : 'publisher';
+const PACKED = params.get('packed') === 'true' || params.get('packed') === '1';
+document.body.classList.add(ROLE === 'publisher' ? 'pub' : 'sub');
+$('rolePill').textContent = ROLE + (PACKED ? ' (packed-alpha)' : '');
+$('rolePill').className = 'role-pill ' + (ROLE === 'publisher' ? 'pub' : 'sub');
+if (params.get('room')) $('room').value = params.get('room');
+
+function animateCanvas() {
+  const cv = $('cv');
+  // Packed mode: 32:9 canvas, RGB on left half, alpha-as-grayscale on right
+  // half. The matching receiver shader will reconstruct RGBA from this.
+  if (PACKED) {
+    cv.width = 640;
+    cv.height = 180;
+  }
+  const ctx = cv.getContext('2d');
+  let t = 0;
+  setInterval(() => {
+    if (PACKED) {
+      const W = cv.width, H = cv.height, HW = W / 2;
+      // Left half: RGB content (a rotating colored disc + frame counter)
+      ctx.fillStyle = '#202030';
+      ctx.fillRect(0, 0, HW, H);
+      ctx.save();
+      ctx.beginPath(); ctx.rect(0, 0, HW, H); ctx.clip();
+      ctx.fillStyle = `hsl(${(t * 6) % 360}, 70%, 55%)`;
+      const cx = HW / 2, cy = H / 2;
+      const rad = 50 + 15 * Math.sin(t * 0.1);
+      ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = '14px system-ui';
+      ctx.fillText('frame ' + t, 8, 18);
+      ctx.restore();
+
+      // Right half: alpha mask as grayscale (white=opaque, black=transparent).
+      // Same circle is opaque; outside is transparent. Soft 4-px feather at the
+      // edge to exercise partial alpha through the encoder.
+      ctx.fillStyle = '#000';
+      ctx.fillRect(HW, 0, HW, H);
+      const grad = ctx.createRadialGradient(HW + cx, cy, rad - 4, HW + cx, cy, rad);
+      grad.addColorStop(0, '#fff');
+      grad.addColorStop(1, '#000');
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(HW + cx, cy, rad, 0, Math.PI * 2); ctx.fill();
+    } else {
+      ctx.fillStyle = `hsl(${(t * 4) % 360}, 60%, 40%)`;
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      ctx.fillStyle = '#fff';
+      ctx.font = '24px system-ui';
+      ctx.fillText('frame ' + t, 20, 100);
+    }
+    t++;
+  }, 33);
+  return cv.captureStream(30);
+}
+
+async function run() {
+  setStatus('starting');
+  $('log').textContent = '';
+
+  let code = $('room').value.trim();
+  if (!code) {
+    const res = await fetch('/api/new-room');
+    code = (await res.json()).code;
+    $('room').value = code;
+  }
+  log('room', code);
+
+  const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+  const ws = new WebSocket(wsUrl);
+  let seq = 0;
+  const sendMsg = (m) => ws.send(JSON.stringify({ seq: ++seq, ...m }));
+
+  // ice_servers from the relay (STUN + TURN) arrive in the Welcome
+  // message; set them via setConfiguration before createOffer / track add.
+  const pc = new RTCPeerConnection({});
+  window.pc = pc; // expose for devtools debugging
+
+  if (ROLE === 'publisher') {
+    const stream = animateCanvas();
+    for (const track of stream.getVideoTracks()) {
+      pc.addTrack(track, stream);
+    }
+  } else {
+    // subscriber: pre-attach incoming tracks to the video element
+    const remote = new MediaStream();
+    $('vid').srcObject = remote;
+    pc.ontrack = (e) => {
+      log('ontrack', e.track.kind, e.track.id);
+      remote.addTrack(e.track);
+    };
+  }
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      sendMsg({ type: 'ice_candidate', candidate: JSON.stringify(e.candidate.toJSON()) });
+    }
+  };
+  pc.onconnectionstatechange = () => {
+    log('pc state', pc.connectionState);
+    if (pc.connectionState === 'connected') setStatus('CONNECTED', 'ok');
+    else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') setStatus(pc.connectionState, 'err');
+    else setStatus(pc.connectionState, 'warn');
+  };
+
+  ws.onopen = () => {
+    sendMsg({ type: 'hello', protocol_version: 1, role: ROLE, room: code });
+  };
+  ws.onmessage = async (ev) => {
+    const m = JSON.parse(ev.data);
+    log('<-', m.type, m.kind || '');
+    if (m.type === 'welcome') {
+      const ice = m.room_state && m.room_state.ice_servers;
+      if (ice && ice.length) {
+        try { pc.setConfiguration({ iceServers: ice }); }
+        catch (e) { log('setConfiguration failed', e.message); }
+      }
+      if (ROLE === 'publisher') {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        sendMsg({ type: 'sdp', kind: 'offer', sdp: offer.sdp });
+      }
+      // subscriber: just wait for relay's offer
+    } else if (m.type === 'sdp' && m.kind === 'offer') {
+      // relay-initiated offer (subscriber path, including renegotiations)
+      await pc.setRemoteDescription({ type: 'offer', sdp: m.sdp });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      sendMsg({ type: 'sdp', kind: 'answer', sdp: answer.sdp });
+    } else if (m.type === 'sdp' && m.kind === 'answer') {
+      await pc.setRemoteDescription({ type: 'answer', sdp: m.sdp });
+    } else if (m.type === 'ice_candidate') {
+      try { await pc.addIceCandidate(JSON.parse(m.candidate)); }
+      catch (e) { log('addIceCandidate err', e.message); }
+    } else if (m.type === 'peer_joined' || m.type === 'peer_left') {
+      log('peer', m);
+    } else if (m.type === 'error') {
+      setStatus('error: ' + m.detail, 'err');
+    }
+  };
+  ws.onclose = () => log('ws closed');
+  ws.onerror = (e) => log('ws err', e.message || e);
+}
+
+$('run').addEventListener('click', () => run().catch(e => { log('caught', e.message); setStatus('error', 'err'); }));
+</script>
+</body>
+</html>

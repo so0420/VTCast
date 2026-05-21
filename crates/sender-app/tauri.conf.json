@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "VTCast",
+  "version": "1.0.0",
+  "identifier": "io.github.so0420.vtcast",
+  "build": {
+    "frontendDist": "./ui",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "VTCast",
+        "width": 520,
+        "height": 720,
+        "resizable": true,
+        "url": "index.html"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "publisher": "so0420",
+    "category": "Utility",
+    "shortDescription": "WebRTC로 VTuber 오버레이를 송출",
+    "longDescription": "Spout / 윈도우 / 디스플레이 소스를 캡처해 하드웨어 인코딩으로 VTCast 릴레이 룸에 송출합니다. 수신 페이지는 OBS Browser Source에서 원본 알파(Spout) 또는 크로마 키 투명도(윈도우 / 디스플레이) 그대로 렌더링됩니다.",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "perMachine",
+        "displayLanguageSelector": false,
+        "languages": ["English", "Korean"]
+      }
+    }
+  }
+}
