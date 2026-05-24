@@ -5194,7 +5194,7 @@ dependencies = [
 
 [[package]]
 name = "vtcast-capture"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "parking_lot",
@@ -5204,7 +5204,7 @@ dependencies = [
 
 [[package]]
 name = "vtcast-protocol"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5212,7 +5212,7 @@ dependencies = [
 
 [[package]]
 name = "vtcast-relay"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5234,7 +5234,7 @@ dependencies = [
 
 [[package]]
 name = "vtcast-sender"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5256,7 +5256,7 @@ dependencies = [
 
 [[package]]
 name = "vtcast-sender-app"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "serde",
