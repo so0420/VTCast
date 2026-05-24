@@ -4,6 +4,7 @@
   "description": "Default permissions for the main window — needs core:default to use invoke + event.listen/emit.",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "updater:default"
   ]
 }

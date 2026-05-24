@@ -108,6 +108,39 @@ async fn pipeline_running(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(state.pipeline.lock().await.is_some())
 }
 
+/// Check the configured update endpoint. Returns the new version string if an
+/// update is available, or `None` if we're up to date. Errors (offline, no
+/// release yet) are returned so the UI can stay quiet instead of blocking.
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| format!("{:#}", e))?;
+    match updater.check().await {
+        Ok(Some(update)) => Ok(Some(update.version.clone())),
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("{:#}", e)),
+    }
+}
+
+/// Download + verify (signature) + install the latest update, then relaunch.
+/// `download_and_install` only proceeds if the package signature matches the
+/// public key baked into the build, so a tampered update is rejected.
+#[tauri::command]
+async fn do_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| format!("{:#}", e))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("{:#}", e))?
+        .ok_or_else(|| "이미 최신 버전입니다".to_string())?;
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| format!("{:#}", e))?;
+    app.restart()
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -117,6 +150,7 @@ fn main() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             app.manage(AppState {
                 pipeline: Arc::new(Mutex::new(None)),
@@ -152,7 +186,9 @@ fn main() {
             list_displays,
             start_pipeline,
             stop_pipeline,
-            pipeline_running
+            pipeline_running,
+            check_update,
+            do_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -85,6 +85,12 @@
 <body>
 <h1>VTCast <span id="status" class="pill idle">대기</span></h1>
 
+<div id="updateBanner" style="display:none; margin:8px 0; padding:10px 12px; border:1px solid #2f6f4a; border-radius:8px; background:#13241a; color:#d6f5e3;">
+  <span id="updateText">새 버전이 있습니다.</span>
+  <button id="updateBtn" style="margin-left:8px;">업데이트</button>
+  <button id="updateLater" style="margin-left:4px;">나중에</button>
+</div>
+
 <label>릴레이 URL</label>
 <input id="relay" value="https://vtcast.jamku.me">
 
@@ -231,6 +237,36 @@ function saveSettings() {
 }
 
 loadSettings();
+
+// --- Auto-update: ask the configured endpoint (GitHub Releases) on launch.
+// If a newer signed release exists, show the banner; the button downloads,
+// verifies the signature, installs, and relaunches. Failures (offline / no
+// release yet) stay silent so they never block normal use.
+async function checkForUpdate() {
+  try {
+    const ver = await invoke('check_update');
+    if (ver) {
+      $('updateText').textContent = `새 버전 ${ver} 이(가) 있습니다. 업데이트 하시겠습니까?`;
+      $('updateBanner').style.display = 'block';
+    }
+  } catch (e) {
+    console.warn('업데이트 확인 실패(무시):', e);
+  }
+}
+$('updateBtn').onclick = async () => {
+  $('updateBtn').disabled = true;
+  $('updateLater').disabled = true;
+  $('updateText').textContent = '업데이트 다운로드 중… 완료되면 자동으로 재시작됩니다.';
+  try {
+    await invoke('do_update');
+  } catch (e) {
+    $('updateText').textContent = '업데이트 실패: ' + e;
+    $('updateBtn').disabled = false;
+    $('updateLater').disabled = false;
+  }
+};
+$('updateLater').onclick = () => { $('updateBanner').style.display = 'none'; };
+checkForUpdate();
 
 const log = (line) => {
   const ts = new Date().toLocaleTimeString();
