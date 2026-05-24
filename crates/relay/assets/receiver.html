@@ -157,7 +157,7 @@ gl.clearColor(0, 0, 0, 0);
 
 let sized = false;
 let frames = 0;
-function render() {
+function drawFrame() {
   if (video.readyState >= 2 && video.videoWidth > 0) {
     if (!sized) {
       // Packed source has RGB on the left half; output is that half's width.
@@ -178,9 +178,24 @@ function render() {
     frames++;
     if (frames % 30 === 0) $('pkts').textContent = frames;
   }
-  requestAnimationFrame(render);
 }
-render();
+
+// Draw on every *decoded video frame* via requestVideoFrameCallback. Unlike
+// requestAnimationFrame, this keeps firing when the page isn't the active
+// tab and inside OBS Browser Source (CEF), where rAF gets throttled/paused —
+// that throttling is what froze the canvas on the last drawn frame while the
+// video element kept receiving new frames. rAF is the fallback for the rare
+// browser without rVFC, plus a slow setInterval safety net so the picture
+// never stays stale even if both are throttled.
+if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+  const onVideoFrame = () => { drawFrame(); video.requestVideoFrameCallback(onVideoFrame); };
+  video.requestVideoFrameCallback(onVideoFrame);
+} else {
+  const loop = () => { drawFrame(); requestAnimationFrame(loop); };
+  loop();
+}
+// Safety net: redraw the latest frame even if rVFC/rAF are throttled.
+setInterval(drawFrame, 200);
 
 // === WebRTC subscriber flow (mesh / peer-to-peer) ===
 //
