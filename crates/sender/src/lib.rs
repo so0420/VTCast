@@ -15,6 +15,7 @@ pub mod nvenc;
 mod packer;
 mod publisher;
 mod resize;
+mod sysprio;
 
 pub use encoder::EncoderKind;
 pub use packer::ChromaKey;
@@ -479,6 +480,9 @@ async fn orchestrate(ctx: OrchestratorCtx, events_tx: mpsc::Sender<PipelineEvent
     let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>(2);
     let shutdown_capture = Arc::clone(&shutdown);
     let capture_task = tokio::task::spawn_blocking(move || {
+        // Yield to audio / UI threads under load — this loop does the CPU-path
+        // pack/convert/resize and shouldn't compete with the streamer's audio.
+        sysprio::lower_current_thread_priority("capture");
         let mut rx = rx;
         let raw_size = (raw_w * raw_h * 4) as usize;
         let src_size = (src_w * src_h * 4) as usize;
@@ -649,6 +653,7 @@ fn spawn_mf_encode(
     bitrate_kbps: u32,
 ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
     let encoder_task = tokio::task::spawn_blocking(move || {
+        sysprio::lower_current_thread_priority("mf-encode");
         // Selection order: NVIDIA async → Intel QSV async → AMD AMF async →
         // Microsoft DX12 sync (GPU but synchronous) → MS software MFT.
         // The async-hardware path is much lower CPU but more code to drive,
@@ -953,7 +958,10 @@ async fn try_start_gpu_spout(config: &Config, room: &str, receiver_url: &str) ->
         frame_interval,
         shutdown: Arc::clone(&shutdown),
     };
-    let encode_task = tokio::task::spawn_blocking(move || gpu_encode_loop(ctx, au_tx, init_tx));
+    let encode_task = tokio::task::spawn_blocking(move || {
+        sysprio::lower_current_thread_priority("gpu-encode");
+        gpu_encode_loop(ctx, au_tx, init_tx)
+    });
 
     // Block on init before committing. Any failure (or timeout, or the worker
     // dying early) drops us back to the CPU pipeline instead of leaving a dead
@@ -1062,6 +1070,10 @@ fn gpu_encode_loop(
     };
     let device = recv.device().clone();
     let context = recv.context().clone();
+    // Deprioritise our GPU submissions relative to the game / OBS / compositor
+    // sharing this GPU, so a saturated card doesn't delay their work (which can
+    // surface as audio-driver DPC latency / mic crackle for the broadcaster).
+    sysprio::lower_gpu_priority(&device);
     let (src_w, src_h) = recv.dimensions();
     let src_format = recv.format();
 
