@@ -87,7 +87,14 @@ pub struct SpoutReceiver {
     _device: ID3D11Device,
     context: ID3D11DeviceContext,
     shared_tex: ID3D11Texture2D,
-    staging: ID3D11Texture2D,
+    /// CPU-readback staging texture, created lazily on the first `grab_into`.
+    /// The GPU zero-copy pipeline never reads back, so it never allocates this
+    /// — which also means a source whose format refuses a staging copy can't
+    /// break pipeline *start* for GPU users; only an actual CPU grab would.
+    staging: Option<ID3D11Texture2D>,
+    /// Staging-safe DXGI format resolved from the opened texture, used when
+    /// the staging texture is finally built.
+    staging_format: DXGI_FORMAT,
     adapter_name: String,
 }
 
@@ -116,21 +123,15 @@ impl SpoutReceiver {
             match Self::try_open_shared(&device, handle) {
                 Ok(shared_tex) => {
                     let mut resolved = info.clone();
-                    let staging =
-                        match Self::staging_from_shared(&device, &shared_tex, &mut resolved) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                last_err = Some(e);
-                                continue;
-                            }
-                        };
+                    let staging_format = Self::resolve_shared_desc(&shared_tex, &mut resolved);
                     return Ok(Self {
                         sender_name: sender_name.to_string(),
                         info: resolved,
                         _device: device,
                         context,
                         shared_tex,
-                        staging,
+                        staging: None,
+                        staging_format,
                         adapter_name,
                     });
                 }
@@ -173,14 +174,7 @@ impl SpoutReceiver {
             match Self::try_open_shared(&device, handle) {
                 Ok(shared_tex) => {
                     let mut resolved = info.clone();
-                    let staging =
-                        match Self::staging_from_shared(&device, &shared_tex, &mut resolved) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                last_err = Some(e);
-                                continue;
-                            }
-                        };
+                    let staging_format = Self::resolve_shared_desc(&shared_tex, &mut resolved);
                     let lname = adapter_name.to_lowercase();
                     return Ok((
                         Self {
@@ -189,7 +183,8 @@ impl SpoutReceiver {
                             _device: device,
                             context,
                             shared_tex,
-                            staging,
+                            staging: None,
+                            staging_format,
                             adapter_name,
                         },
                         lname,
@@ -246,21 +241,20 @@ impl SpoutReceiver {
         }
     }
 
-    /// Build the CPU-readback staging texture from the *opened* shared
-    /// texture's authoritative desc, updating `info` to match.
+    /// Resolve authoritative dims + format from the *opened* shared texture's
+    /// desc (updating `info`) and return the staging-safe format to use for a
+    /// later CPU readback. Does not allocate anything — crucially, it can't
+    /// fail, so it never blocks pipeline start.
     ///
     /// Spout senders frequently write a bogus or zero (`DXGI_FORMAT_UNKNOWN`)
     /// format — and sometimes stale dims — into their shared-memory metadata.
-    /// Trusting that makes `CreateTexture2D(staging)` fail with E_INVALIDARG
-    /// (0x80070057), which takes down the whole pipeline (the GPU zero-copy
-    /// path doesn't even use this texture, but it was created eagerly). The
-    /// opened texture's own `GetDesc` is ground truth, so we resolve dims +
-    /// format from it and normalise to a staging-safe format.
-    fn staging_from_shared(
-        device: &ID3D11Device,
-        shared_tex: &ID3D11Texture2D,
-        info: &mut SenderInfo,
-    ) -> Result<ID3D11Texture2D> {
+    /// Trusting that made `CreateTexture2D(staging)` fail with E_INVALIDARG
+    /// (0x80070057). The opened texture's own `GetDesc` is ground truth, so we
+    /// read from it and normalise to a staging-safe format. Building the actual
+    /// staging texture is deferred to [`grab_into`] so the GPU zero-copy path
+    /// (which never reads back) can't be taken down by a source format that
+    /// refuses a staging copy.
+    fn resolve_shared_desc(shared_tex: &ID3D11Texture2D, info: &mut SenderInfo) -> DXGI_FORMAT {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { shared_tex.GetDesc(&mut desc) };
         // Prefer the real texture's dims/format; keep the reported metadata
@@ -274,7 +268,7 @@ impl SpoutReceiver {
         // Report the concrete, known format downstream so the BGRA->RGBA swap
         // and the GPU converter's format matching pick the right path.
         info.format = staging_fmt.0 as u32;
-        d3d11::create_staging_texture(device, info.width, info.height, staging_fmt)
+        staging_fmt
     }
 
     pub fn sender_name(&self) -> &str {
@@ -309,9 +303,25 @@ impl SpoutReceiver {
                 self.frame_bytes()
             ));
         }
+        // Build the CPU-readback staging texture on first use (see the field
+        // doc). Only the CPU pipeline ever gets here; the GPU zero-copy path
+        // never reads back, so it never pays this cost nor risks its failure.
+        if self.staging.is_none() {
+            let staging = d3d11::create_staging_texture(
+                &self._device,
+                self.info.width,
+                self.info.height,
+                self.staging_format,
+            )?;
+            self.staging = Some(staging);
+        }
+        let staging = self
+            .staging
+            .as_ref()
+            .expect("staging texture created above");
         unsafe {
             let src: ID3D11Resource = self.shared_tex.cast()?;
-            let dst: ID3D11Resource = self.staging.cast()?;
+            let dst: ID3D11Resource = staging.cast()?;
             self.context.CopyResource(&dst, &src);
 
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();

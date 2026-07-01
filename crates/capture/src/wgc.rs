@@ -160,19 +160,49 @@ impl WgcCapture {
 
         let shared = Arc::new(Shared::default());
 
-        let settings = Settings::new(
-            window,
-            CursorCaptureSettings::Default,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
-            DirtyRegionSettings::Default,
-            ColorFormat::Rgba8,
-            shared.clone(),
-        );
+        // Requesting `WithoutBorder` (hide the yellow capture highlight) needs
+        // a recent Windows build; on older ones `start_free_threaded` fails
+        // with `BorderConfigUnsupported`. Try the clean setting first, then
+        // fall back to `Default` (all settings at system default — no newer
+        // WGC config APIs touched), which captures fine everywhere, just
+        // possibly with the highlight border. Re-resolve the window each
+        // attempt because `Settings::new` consumes it.
+        let start_with = |border: DrawBorderSettings| -> Result<()> {
+            let window = if contains {
+                Window::from_contains_name(title)
+            } else {
+                Window::from_name(title)
+            }
+            .map_err(|e| anyhow!("window lookup '{}': {:?}", title, e))?;
+            let settings = Settings::new(
+                window,
+                CursorCaptureSettings::Default,
+                border,
+                SecondaryWindowSettings::Default,
+                MinimumUpdateIntervalSettings::Default,
+                DirtyRegionSettings::Default,
+                ColorFormat::Rgba8,
+                shared.clone(),
+            );
+            WgcHandler::start_free_threaded(settings)
+                .map(|_| ())
+                .map_err(|e| anyhow!("WgcHandler::start_free_threaded: {:?}", e))
+        };
 
-        WgcHandler::start_free_threaded(settings)
-            .map_err(|e| anyhow!("WgcHandler::start_free_threaded: {:?}", e))?;
+        // `window` was only needed for the pre-flight rect/visibility checks
+        // above; the capture itself re-resolves it inside `start_with`.
+        if let Err(e) = start_with(DrawBorderSettings::WithoutBorder) {
+            if format!("{e:?}").contains("Unsupported") {
+                eprintln!(
+                    "[wgc] '{}': border/config setting unsupported on this Windows \
+                     build; retrying with system defaults",
+                    actual_title
+                );
+                start_with(DrawBorderSettings::Default)?;
+            } else {
+                return Err(e);
+            }
+        }
 
         // Wait briefly for the first frame so we know the actual dimensions.
         // WGC reports dimensions on the first delivered frame; without that

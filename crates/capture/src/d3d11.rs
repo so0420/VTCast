@@ -148,7 +148,12 @@ pub fn create_staging_texture(
     unsafe {
         device
             .CreateTexture2D(&mut desc, None, Some(&mut staging))
-            .context("CreateTexture2D(staging)")?;
+            .with_context(|| {
+                format!(
+                    "CreateTexture2D(staging) {}x{} fmt={}",
+                    width, height, format.0
+                )
+            })?;
     }
     staging.ok_or_else(|| anyhow!("staging texture null"))
 }
