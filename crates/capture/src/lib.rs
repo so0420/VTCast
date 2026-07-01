@@ -71,10 +71,11 @@ use windows::core::Interface;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Device1, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_UNORM,
+    DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_UNKNOWN,
 };
 
 /// An open receiver pinned to a specific sender. Owns the D3D11 device that
@@ -114,15 +115,18 @@ impl SpoutReceiver {
             };
             match Self::try_open_shared(&device, handle) {
                 Ok(shared_tex) => {
-                    let staging = d3d11::create_staging_texture(
-                        &device,
-                        info.width,
-                        info.height,
-                        DXGI_FORMAT(info.format as i32),
-                    )?;
+                    let mut resolved = info.clone();
+                    let staging =
+                        match Self::staging_from_shared(&device, &shared_tex, &mut resolved) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                last_err = Some(e);
+                                continue;
+                            }
+                        };
                     return Ok(Self {
                         sender_name: sender_name.to_string(),
-                        info,
+                        info: resolved,
                         _device: device,
                         context,
                         shared_tex,
@@ -168,17 +172,20 @@ impl SpoutReceiver {
             };
             match Self::try_open_shared(&device, handle) {
                 Ok(shared_tex) => {
-                    let staging = d3d11::create_staging_texture(
-                        &device,
-                        info.width,
-                        info.height,
-                        DXGI_FORMAT(info.format as i32),
-                    )?;
+                    let mut resolved = info.clone();
+                    let staging =
+                        match Self::staging_from_shared(&device, &shared_tex, &mut resolved) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                last_err = Some(e);
+                                continue;
+                            }
+                        };
                     let lname = adapter_name.to_lowercase();
                     return Ok((
                         Self {
                             sender_name: sender_name.to_string(),
-                            info,
+                            info: resolved,
                             _device: device,
                             context,
                             shared_tex,
@@ -237,6 +244,37 @@ impl SpoutReceiver {
                 }
             }
         }
+    }
+
+    /// Build the CPU-readback staging texture from the *opened* shared
+    /// texture's authoritative desc, updating `info` to match.
+    ///
+    /// Spout senders frequently write a bogus or zero (`DXGI_FORMAT_UNKNOWN`)
+    /// format — and sometimes stale dims — into their shared-memory metadata.
+    /// Trusting that makes `CreateTexture2D(staging)` fail with E_INVALIDARG
+    /// (0x80070057), which takes down the whole pipeline (the GPU zero-copy
+    /// path doesn't even use this texture, but it was created eagerly). The
+    /// opened texture's own `GetDesc` is ground truth, so we resolve dims +
+    /// format from it and normalise to a staging-safe format.
+    fn staging_from_shared(
+        device: &ID3D11Device,
+        shared_tex: &ID3D11Texture2D,
+        info: &mut SenderInfo,
+    ) -> Result<ID3D11Texture2D> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { shared_tex.GetDesc(&mut desc) };
+        // Prefer the real texture's dims/format; keep the reported metadata
+        // only if the desc came back empty (shouldn't happen for a texture we
+        // just opened, but stay defensive).
+        if desc.Width != 0 && desc.Height != 0 {
+            info.width = desc.Width;
+            info.height = desc.Height;
+        }
+        let staging_fmt = staging_safe_format(desc.Format);
+        // Report the concrete, known format downstream so the BGRA->RGBA swap
+        // and the GPU converter's format matching pick the right path.
+        info.format = staging_fmt.0 as u32;
+        d3d11::create_staging_texture(device, info.width, info.height, staging_fmt)
     }
 
     pub fn sender_name(&self) -> &str {
@@ -318,6 +356,20 @@ impl SpoutReceiver {
 // which we don't pull in for the library to keep deps minimal. Callers can
 // inspect format() upfront and decide.
 fn tracing_unexpected_format(_f: u32) {}
+
+/// Map a shared texture's real format to one valid for a CPU-readable staging
+/// copy. Typeless formats become their UNORM sibling (so `Map` returns sane
+/// bytes and `CopyResource` stays in-family); `UNKNOWN` — which many Spout
+/// senders report when they leave the field unset — becomes BGRA8_UNORM, the
+/// Spout default. Everything else passes through unchanged.
+fn staging_safe_format(fmt: DXGI_FORMAT) -> DXGI_FORMAT {
+    match fmt {
+        DXGI_FORMAT_B8G8R8A8_TYPELESS => DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_FORMAT_R8G8B8A8_TYPELESS => DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_UNKNOWN => DXGI_FORMAT_B8G8R8A8_UNORM,
+        other => other,
+    }
+}
 
 /// Name of a DXGI_FORMAT value for diagnostics.
 pub fn format_name(f: u32) -> &'static str {

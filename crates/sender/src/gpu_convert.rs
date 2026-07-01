@@ -36,8 +36,12 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_UNORM,
-    DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM,
-    DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_FORMAT_NV12, DXGI_FORMAT_R10G10B10A2_TYPELESS, DXGI_FORMAT_R10G10B10A2_UNORM,
+    DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_TYPELESS,
+    DXGI_FORMAT_R16G16B16A16_UNORM, DXGI_FORMAT_R32G32B32A32_FLOAT,
+    DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R8G8B8A8_TYPELESS,
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM,
+    DXGI_SAMPLE_DESC,
 };
 
 // DXGI_FORMAT numeric values we match against the Spout sender's reported
@@ -49,6 +53,17 @@ const FMT_B8G8R8A8_TYPELESS: u32 = 90;
 const FMT_R8G8B8A8_UNORM: u32 = 28;
 const FMT_R8G8B8A8_UNORM_SRGB: u32 = 29;
 const FMT_R8G8B8A8_TYPELESS: u32 = 27;
+// Wide-gamut / HDR families some avatar apps emit (Spout can carry any DXGI
+// format). The shader samples everything as float4, so once the snapshot +
+// SRV formats match the source's copy family, the NV12 output is identical
+// 8-bit regardless of source bit depth.
+const FMT_R10G10B10A2_TYPELESS: u32 = 23;
+const FMT_R10G10B10A2_UNORM: u32 = 24;
+const FMT_R16G16B16A16_TYPELESS: u32 = 9;
+const FMT_R16G16B16A16_FLOAT: u32 = 10;
+const FMT_R16G16B16A16_UNORM: u32 = 11;
+const FMT_R32G32B32A32_TYPELESS: u32 = 1;
+const FMT_R32G32B32A32_FLOAT: u32 = 2;
 
 /// HLSL for the pack + NV12 conversion. One fullscreen-triangle VS, plus a
 /// luma PS (writes the R8 plane at full size) and a chroma PS (writes the
@@ -361,6 +376,23 @@ fn snapshot_formats(src_format: u32) -> (DXGI_FORMAT, DXGI_FORMAT) {
         }
         FMT_R8G8B8A8_UNORM | FMT_R8G8B8A8_UNORM_SRGB | FMT_R8G8B8A8_TYPELESS => {
             (DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM)
+        }
+        // Wide-gamut / HDR sources. Snapshot in the typeless parent (so
+        // CopyResource stays in-family with the typed source) and sample
+        // through the concrete typed SRV; the shader's float4 samples read
+        // 10-bit UNORM / 16-bit + 32-bit FLOAT values transparently and the
+        // BT.601 maths clamp them into the 8-bit NV12 output.
+        FMT_R10G10B10A2_UNORM | FMT_R10G10B10A2_TYPELESS => {
+            (DXGI_FORMAT_R10G10B10A2_TYPELESS, DXGI_FORMAT_R10G10B10A2_UNORM)
+        }
+        FMT_R16G16B16A16_FLOAT | FMT_R16G16B16A16_TYPELESS => {
+            (DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R16G16B16A16_FLOAT)
+        }
+        FMT_R16G16B16A16_UNORM => {
+            (DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R16G16B16A16_UNORM)
+        }
+        FMT_R32G32B32A32_FLOAT | FMT_R32G32B32A32_TYPELESS => {
+            (DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_FLOAT)
         }
         // Unknown: best-effort RGBA. If the family doesn't match, CopyResource
         // fails at convert() and the caller falls back to the CPU path.
