@@ -50,16 +50,36 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Envelope>();
 
     let send_task = tokio::spawn(async move {
-        while let Some(env) = rx.recv().await {
-            let s = match serde_json::to_string(&env) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = ?e, "serialize outbound");
-                    continue;
+        // Keepalive: signaling goes silent once negotiation is done, and
+        // idle WebSockets get killed by proxies in front of the relay —
+        // Cloudflare drops them after ~100 s of no traffic, which tore down
+        // every session's signaling every couple of minutes (the publisher
+        // then rebuilt its track + PCs, freezing receivers for seconds each
+        // time). A protocol-level Ping every 30 s keeps traffic flowing in
+        // both directions (browsers and tungstenite auto-Pong) with zero
+        // client-side changes.
+        let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                env = rx.recv() => {
+                    let Some(env) = env else { break };
+                    let s = match serde_json::to_string(&env) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!(error = ?e, "serialize outbound");
+                            continue;
+                        }
+                    };
+                    if sender_ws.send(WsMessage::Text(s.into())).await.is_err() {
+                        break;
+                    }
                 }
-            };
-            if sender_ws.send(WsMessage::Text(s.into())).await.is_err() {
-                break;
+                _ = keepalive.tick() => {
+                    if sender_ws.send(WsMessage::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });

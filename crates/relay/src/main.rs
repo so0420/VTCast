@@ -51,6 +51,25 @@ async fn main() -> Result<()> {
         .unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
     let turn_advertised = std::env::var("VTCAST_TURN_ADVERTISED")
         .unwrap_or_else(|_| turn_public_ip.to_string());
+    // A loopback/unspecified advertised address means every remote peer gets
+    // a TURN URL pointing at *its own machine* — TURN fallback silently dead.
+    // This is exactly what happens when the env vars are forgotten on a
+    // public deployment, so shout about it at startup.
+    let advertised_unreachable = turn_advertised
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback() || ip.is_unspecified())
+        .unwrap_or(false)
+        || turn_advertised == "localhost";
+    if advertised_unreachable {
+        tracing::warn!(
+            advertised = %turn_advertised,
+            "TURN is advertising a loopback address — remote peers CANNOT use \
+             TURN fallback. Set VTCAST_TURN_PUBLIC_IP (and optionally \
+             VTCAST_TURN_ADVERTISED) to this server's public IP, and make sure \
+             UDP port {} is reachable (Cloudflare does not proxy UDP).",
+            turn_port
+        );
+    }
     let turn_secret = std::env::var("VTCAST_TURN_SECRET").unwrap_or_else(|_| {
         // Random per-process secret. Restarting the relay invalidates
         // outstanding credentials, which is fine — clients are expected
