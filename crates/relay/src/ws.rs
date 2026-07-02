@@ -152,7 +152,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             room_state: RoomState {
                 code: room.code.clone(),
                 peers: room.snapshot(),
-                ice_servers: state.turn.ice_servers_for_peer(),
+                ice_servers: state
+                    .turn
+                    .as_ref()
+                    .map(|t| t.ice_servers_for_peer())
+                    .unwrap_or_else(crate::turn::stun_only_ice_servers),
             },
         },
     });

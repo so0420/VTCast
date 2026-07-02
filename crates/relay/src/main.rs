@@ -25,7 +25,9 @@ use tracing_subscriber::EnvFilter;
 #[derive(Clone)]
 pub struct AppState {
     pub rooms: Arc<room::RoomRegistry>,
-    pub turn: Arc<turn::TurnService>,
+    /// `None` when TURN is disabled (`VTCAST_TURN_ENABLED=false`) — peers get
+    /// STUN-only ICE servers and no media can ever relay through this host.
+    pub turn: Option<Arc<turn::TurnService>>,
 }
 
 #[tokio::main]
@@ -39,6 +41,13 @@ async fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,vtcast_relay=debug")),
         )
         .init();
+
+    // TURN on/off switch. Default ON (TURN is the fallback for peers whose
+    // NATs defeat direct P2P). Turning it OFF guarantees no media ever relays
+    // through this host's bandwidth — those peers just won't connect.
+    let turn_enabled = std::env::var("VTCAST_TURN_ENABLED")
+        .map(|v| !matches!(v.trim().to_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true);
 
     // TURN config from env (or sensible local-dev defaults)
     let turn_port: u16 = std::env::var("VTCAST_TURN_PORT")
@@ -69,7 +78,7 @@ async fn main() -> Result<()> {
         .map(|ip| ip.is_loopback() || ip.is_unspecified())
         .unwrap_or(false)
         || turn_advertised == "localhost";
-    if advertised_unreachable {
+    if turn_enabled && advertised_unreachable {
         tracing::warn!(
             advertised = %turn_advertised,
             "TURN is advertising a loopback address — remote peers CANNOT use \
@@ -87,17 +96,26 @@ async fn main() -> Result<()> {
         rand::rng().fill_bytes(&mut bytes);
         hex_encode(&bytes)
     });
-    let turn = Arc::new(
-        turn::TurnService::start(
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            turn_public_ip,
-            turn_port,
-            turn_advertised.clone(),
-            turn_secret,
-        )
-        .await?,
-    );
-    tracing::info!(port = turn_port, advertised = %turn_advertised, "TURN listening (UDP)");
+    let turn = if turn_enabled {
+        let t = Arc::new(
+            turn::TurnService::start(
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                turn_public_ip,
+                turn_port,
+                turn_advertised.clone(),
+                turn_secret,
+            )
+            .await?,
+        );
+        tracing::info!(port = turn_port, advertised = %turn_advertised, "TURN listening (UDP)");
+        Some(t)
+    } else {
+        tracing::info!(
+            "TURN disabled (VTCAST_TURN_ENABLED=false) — peers get STUN-only \
+             ICE; no media will relay through this host"
+        );
+        None
+    };
 
     let state = AppState {
         rooms: Arc::new(room::RoomRegistry::new()),

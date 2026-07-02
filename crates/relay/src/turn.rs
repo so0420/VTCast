@@ -111,3 +111,10 @@ fn default_stun() -> IceServer {
         credential: None,
     }
 }
+
+/// ICE-server list when TURN is disabled: STUN only. Peers that can't hole-
+/// punch a direct path simply won't connect — the trade the operator makes
+/// to guarantee zero media ever relays through this server.
+pub fn stun_only_ice_servers() -> Vec<IceServer> {
+    vec![default_stun()]
+}
