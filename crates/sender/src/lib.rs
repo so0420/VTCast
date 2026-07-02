@@ -553,6 +553,10 @@ async fn orchestrate(ctx: OrchestratorCtx, events_tx: mpsc::Sender<PipelineEvent
         EncoderBackend::Mf => spawn_mf_encode(frame_rx, au_tx, packed_w, packed_h, fps, bitrate_kbps),
     };
 
+    // The CPU-path encoders (ffmpeg subprocess / MF byte-stream) have no
+    // force-IDR hook, so PLI just sets a flag nobody reads there; the NACK
+    // retransmission enabled inside the publisher is what matters for them.
+    let force_keyframe = Arc::new(AtomicBool::new(false));
     let publisher_loop = tokio::spawn(publisher_worker(
         relay,
         room,
@@ -560,6 +564,7 @@ async fn orchestrate(ctx: OrchestratorCtx, events_tx: mpsc::Sender<PipelineEvent
         frame_interval,
         Arc::clone(&shutdown),
         events_tx.clone(),
+        force_keyframe,
     ));
 
     tokio::select! {
@@ -791,6 +796,7 @@ async fn publisher_worker(
     frame_interval: Duration,
     shutdown: Arc<AtomicBool>,
     events_tx: mpsc::Sender<PipelineEvent>,
+    force_keyframe: Arc<AtomicBool>,
 ) {
     let mut backoff = RECONNECT_INITIAL_BACKOFF;
     let mut attempt = 0u32;
@@ -801,7 +807,7 @@ async fn publisher_worker(
         }
         attempt += 1;
 
-        match publisher::Publisher::connect(&relay, &room).await {
+        match publisher::Publisher::connect(&relay, &room, Arc::clone(&force_keyframe)).await {
             Ok((handle, mut pump)) => {
                 tracing::debug!(attempt, "publisher connected");
                 backoff = RECONNECT_INITIAL_BACKOFF;
@@ -948,6 +954,7 @@ async fn try_start_gpu_spout(config: &Config, room: &str, receiver_url: &str) ->
     // converter + encoder + a warmup frame) before we commit to the GPU path.
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
+    let force_keyframe = Arc::new(AtomicBool::new(false));
     let ctx = GpuCtx {
         sender_name: name.clone(),
         adapter: adapter.clone(),
@@ -957,6 +964,7 @@ async fn try_start_gpu_spout(config: &Config, room: &str, receiver_url: &str) ->
         bitrate_kbps: config.bitrate_kbps,
         frame_interval,
         shutdown: Arc::clone(&shutdown),
+        force_keyframe: Arc::clone(&force_keyframe),
     };
     let encode_task = tokio::task::spawn_blocking(move || {
         sysprio::lower_current_thread_priority("gpu-encode");
@@ -1004,6 +1012,7 @@ async fn try_start_gpu_spout(config: &Config, room: &str, receiver_url: &str) ->
         frame_interval,
         Arc::clone(&shutdown),
         events_tx.clone(),
+        force_keyframe,
     ));
 
     let sup_shutdown = Arc::clone(&shutdown);
@@ -1036,6 +1045,9 @@ struct GpuCtx {
     bitrate_kbps: u32,
     frame_interval: Duration,
     shutdown: Arc<AtomicBool>,
+    /// Raised by the publisher when a subscriber reports picture loss (PLI);
+    /// the NVENC loop swaps it to false and forces an immediate IDR.
+    force_keyframe: Arc<AtomicBool>,
 }
 
 /// The fused GPU pipeline body, run on a blocking thread. Re-opens the Spout
@@ -1059,6 +1071,7 @@ fn gpu_encode_loop(
         bitrate_kbps,
         frame_interval,
         shutdown,
+        force_keyframe,
     } = ctx;
 
     let (recv, _vendor) = match SpoutReceiver::open_shared(&sender_name) {
@@ -1110,6 +1123,7 @@ fn gpu_encode_loop(
             bitrate_kbps,
             frame_interval,
             &shutdown,
+            &force_keyframe,
             &au_tx,
             init_tx,
         );
@@ -1147,6 +1161,7 @@ fn run_nvenc_encode(
     bitrate_kbps: u32,
     frame_interval: Duration,
     shutdown: &Arc<AtomicBool>,
+    force_keyframe: &Arc<AtomicBool>,
     au_tx: &mpsc::Sender<Vec<u8>>,
     init_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) {
@@ -1177,7 +1192,7 @@ fn run_nvenc_encode(
     let mut produced: u64 = 0;
     let mut dropped: u64 = 0;
     match converter.convert() {
-        Ok(tex) => match session.encode_texture(tex) {
+        Ok(tex) => match session.encode_texture(tex, false) {
             Ok(au_opt) => {
                 let _ = init_tx.send(Ok(()));
                 if let Some(au) = au_opt {
@@ -1202,8 +1217,11 @@ fn run_nvenc_encode(
 
     let mut next = std::time::Instant::now();
     while !shutdown.load(Ordering::Relaxed) {
+        // A subscriber asked for a keyframe (PLI after packet loss) — make
+        // this frame an IDR so it can re-sync now, not at the next GOP.
+        let force_idr = force_keyframe.swap(false, Ordering::Relaxed);
         match converter.convert() {
-            Ok(tex) => match session.encode_texture(tex) {
+            Ok(tex) => match session.encode_texture(tex, force_idr) {
                 Ok(Some(au)) => {
                     produced += 1;
                     if au_tx.try_send(au).is_err() {

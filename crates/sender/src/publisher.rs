@@ -13,6 +13,7 @@
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as PMutex;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -58,6 +59,7 @@ pub enum PumpEnded {
 struct State {
     api: API,
     track: Arc<TrackLocalStaticSample>,
+    force_keyframe: Arc<AtomicBool>,
     /// ICE servers as advertised by the relay in Welcome (STUN + ephemeral
     /// TURN). Captured once and reused as the RTCConfiguration for every
     /// per-subscriber PC we create.
@@ -68,9 +70,13 @@ struct State {
 }
 
 impl Publisher {
+    /// `force_keyframe` is owned by the caller (shared with the encode loop)
+    /// so the same flag survives publisher reconnects: any subscriber PLI/FIR
+    /// sets it, the encoder swaps it to false and emits an immediate IDR.
     pub async fn connect(
         relay_url: &str,
         room: &str,
+        force_keyframe: Arc<AtomicBool>,
     ) -> Result<(Self, tokio::task::JoinHandle<PumpEnded>)> {
         let ws_url = relay_url
             .replace("http://", "ws://")
@@ -114,6 +120,7 @@ impl Publisher {
         let state = Arc::new(State {
             api,
             track: Arc::clone(&track),
+            force_keyframe,
             ice_servers: PMutex::new(Vec::new()),
             pcs: PMutex::new(HashMap::new()),
             out_tx: out_tx.clone(),
@@ -305,9 +312,44 @@ async fn connect_to_subscriber(state: &Arc<State>, sub_id: PeerId) -> Result<()>
     );
 
     let track_local: Arc<dyn TrackLocal + Send + Sync> = state.track.clone();
-    pc.add_track(track_local)
+    let rtp_sender = pc
+        .add_track(track_local)
         .await
         .map_err(|e| anyhow!("add_track: {e}"))?;
+
+    // Drive the sender's RTCP reader. This is NOT optional plumbing: the
+    // interceptor chain (NACK responder that retransmits lost RTP packets)
+    // only processes inbound RTCP while someone is reading it. Without this
+    // loop every lost packet stayed lost, so on a lossy path the subscriber's
+    // decoder showed a frozen frame until an entire IDR happened to arrive
+    // intact — observed in the field as the receiver freezing for up to a
+    // minute while the sender kept encoding happily.
+    //
+    // We also parse PLI/FIR here ("my picture is broken, send a keyframe")
+    // and raise force_keyframe so the encode loop emits an immediate IDR
+    // instead of leaving the subscriber to wait out the 2-second GOP.
+    let force_kf = Arc::clone(&state.force_keyframe);
+    tokio::spawn(async move {
+        use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+        use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+        loop {
+            match rtp_sender.read_rtcp().await {
+                Ok((pkts, _attr)) => {
+                    for p in pkts {
+                        let any = p.as_any();
+                        if any.downcast_ref::<PictureLossIndication>().is_some()
+                            || any.downcast_ref::<FullIntraRequest>().is_some()
+                        {
+                            tracing::debug!(?sub_id, "PLI/FIR from subscriber — forcing IDR");
+                            force_kf.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+                // Sender closed (PC torn down) — end the loop.
+                Err(_) => break,
+            }
+        }
+    });
 
     let out_tx = state.out_tx.clone();
     pc.on_ice_candidate(Box::new(move |c| {
@@ -330,9 +372,23 @@ async fn connect_to_subscriber(state: &Arc<State>, sub_id: PeerId) -> Result<()>
         })
     }));
 
+    let state_for_pc = Arc::downgrade(state);
     pc.on_peer_connection_state_change(Box::new(move |st: RTCPeerConnectionState| {
+        let state_for_pc = state_for_pc.clone();
         Box::pin(async move {
             tracing::info!(?sub_id, ?st, "pc state");
+            // A Failed PC never recovers on its own — drop it so it doesn't
+            // linger in the map. The receiver page detects the same failure,
+            // rejoins with a fresh peer_id, and gets a brand-new PC + offer.
+            if st == RTCPeerConnectionState::Failed {
+                if let Some(state) = state_for_pc.upgrade() {
+                    let pc = state.pcs.lock().unwrap().remove(&sub_id);
+                    if let Some(pc) = pc {
+                        let _ = pc.close().await;
+                        tracing::info!(?sub_id, "failed subscriber pc closed and removed");
+                    }
+                }
+            }
         })
     }));
 

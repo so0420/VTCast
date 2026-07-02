@@ -134,6 +134,11 @@ const NV_ENC_PARAMS_RC_CBR: u32 = 0x2;
 const NV_ENC_PIC_STRUCT_FRAME: u32 = 0x01;
 const NV_ENC_INPUT_IMAGE: u32 = 0x0;
 const NV_ENC_ERR_NEED_MORE_INPUT: NVENCSTATUS = 15;
+// NV_ENC_PIC_FLAGS: force the current frame to be an IDR + emit SPS/PPS with
+// it, so a receiver whose decoder is stuck (packet loss) can re-sync on this
+// exact frame instead of waiting out the GOP.
+const NV_ENC_PIC_FLAG_FORCEIDR: u32 = 0x2;
+const NV_ENC_PIC_FLAG_OUTPUT_SPSPPS: u32 = 0x4;
 // NV_ENC_CONFIG_H264 bitfield positions: outputAUD = bit 6, repeatSPSPPS = bit 12.
 const H264_FLAG_OUTPUT_AUD: u32 = 1 << 6;
 const H264_FLAG_REPEAT_SPSPPS: u32 = 1 << 12;
@@ -695,8 +700,14 @@ impl<'a> NvencSession<'a> {
 
     /// Encode one NV12 D3D11 texture (on the session's device). Returns the
     /// H.264 access unit, or `None` if the encoder buffered the frame and
-    /// produced no output this call.
-    pub fn encode_texture(&mut self, tex: &ID3D11Texture2D) -> Result<Option<Vec<u8>>> {
+    /// produced no output this call. `force_idr` makes this frame an IDR
+    /// (with SPS/PPS) regardless of GOP position — used when a subscriber
+    /// reports picture loss (PLI) so it can re-sync immediately.
+    pub fn encode_texture(
+        &mut self,
+        tex: &ID3D11Texture2D,
+        force_idr: bool,
+    ) -> Result<Option<Vec<u8>>> {
         let registered = self.registered_for(tex)?;
 
         // Map for this submission.
@@ -721,6 +732,9 @@ impl<'a> NvencSession<'a> {
         pic.outputBitstream = self.bitstream;
         pic.bufferFmt = NV_ENC_BUFFER_FORMAT_NV12;
         pic.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
+        if force_idr {
+            pic.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+        }
         pic.inputTimeStamp = self.pts;
         pic.inputDuration = 1;
         self.pts += 1;

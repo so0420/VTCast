@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
     let mut first_au: Option<usize> = None;
     for i in 0..10 {
         let tex = converter.convert()?;
-        match session.encode_texture(tex)? {
+        match session.encode_texture(tex, false)? {
             Some(au) => {
                 produced += 1;
                 if first_au.is_none() {
