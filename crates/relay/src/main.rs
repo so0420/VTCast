@@ -45,10 +45,19 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(3478);
-    let turn_public_ip: IpAddr = std::env::var("VTCAST_TURN_PUBLIC_IP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    // Accepts an IP literal or a hostname (resolved once at startup). A value
+    // that neither parses nor resolves is a hard error — it used to fall back
+    // silently to 127.0.0.1, which advertised an unusable TURN server to every
+    // remote peer and was miserable to notice.
+    let turn_public_ip: IpAddr = match std::env::var("VTCAST_TURN_PUBLIC_IP") {
+        Ok(v) => resolve_ip(&v).ok_or_else(|| {
+            anyhow::anyhow!(
+                "VTCAST_TURN_PUBLIC_IP='{v}' is neither an IP literal nor a \
+                 resolvable hostname"
+            )
+        })?,
+        Err(_) => IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+    };
     let turn_advertised = std::env::var("VTCAST_TURN_ADVERTISED")
         .unwrap_or_else(|_| turn_public_ip.to_string());
     // A loopback/unspecified advertised address means every remote peer gets
@@ -123,6 +132,25 @@ async fn test_rtc() -> axum::response::Html<&'static str> {
 
 async fn receiver() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../assets/receiver.html"))
+}
+
+/// Parse an IP literal, or resolve a hostname to its first address (v4
+/// preferred — TURN allocations here are UDP/IPv4 in practice).
+fn resolve_ip(host: &str) -> Option<IpAddr> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<IpAddr> = (host, 0)
+        .to_socket_addrs()
+        .ok()?
+        .map(|sa| sa.ip())
+        .collect();
+    addrs
+        .iter()
+        .find(|ip| ip.is_ipv4())
+        .or_else(|| addrs.first())
+        .copied()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
